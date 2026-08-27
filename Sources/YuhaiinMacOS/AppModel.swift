@@ -6,6 +6,32 @@ import SwiftUI
 import UniformTypeIdentifiers
 import YuhaiinShared
 
+private enum BinaryUploadStager {
+    static func stage(from url: URL) throws -> (directory: URL, file: URL) {
+        // The selected URL may be security-scoped, but the copy itself must
+        // not block AppModel's main actor while the lease heartbeat is alive.
+        let stagingDirectory = URL(fileURLWithPath: "/tmp", isDirectory: true)
+            .appendingPathComponent(".yuhaiin-upload-\(UUID().uuidString)", isDirectory: true)
+        let stagedURL = stagingDirectory.appendingPathComponent(url.lastPathComponent, isDirectory: false)
+        try FileManager.default.createDirectory(
+            at: stagingDirectory,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
+        )
+        do {
+            try FileManager.default.copyItem(at: url, to: stagedURL)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o600],
+                ofItemAtPath: stagedURL.path
+            )
+            return (stagingDirectory, stagedURL)
+        } catch {
+            try? FileManager.default.removeItem(at: stagingDirectory)
+            throw error
+        }
+    }
+}
+
 private final class AppTerminationCoordinator: @unchecked Sendable {
     private let supervisor: SupervisorClient
 
@@ -93,6 +119,7 @@ final class AppModel: ObservableObject {
     private var activeBinaryPath: String?
     private var monitorTask: Task<Void, Never>?
     private var heartbeatTask: Task<Void, Never>?
+    private var leaseHeartbeatGeneration = UUID()
     private var terminationObserver: NSObjectProtocol?
 
     init() {
@@ -305,28 +332,20 @@ final class AppModel: ObservableObject {
             }
 
             do {
-                if self.leaseID == nil {
-                    self.leaseID = try await self.supervisor.acquireLease()
-                }
                 // The privileged LaunchDaemon cannot directly read protected
                 // user folders such as Downloads because of macOS TCC. Copy
                 // the security-scoped selection into a private, random /tmp
                 // directory while this user process still has access to it.
-                let stagingDirectory = URL(fileURLWithPath: "/tmp", isDirectory: true)
-                    .appendingPathComponent(".yuhaiin-upload-\(UUID().uuidString)", isDirectory: true)
-                let stagedURL = stagingDirectory.appendingPathComponent(url.lastPathComponent, isDirectory: false)
-                try FileManager.default.createDirectory(
-                    at: stagingDirectory,
-                    withIntermediateDirectories: false,
-                    attributes: [.posixPermissions: 0o700]
-                )
+                // Do this before acquiring a lease so a slow copy does not
+                // consume the Supervisor's short lease timeout.
+                let staged = try await Task.detached(priority: .utility) {
+                    try BinaryUploadStager.stage(from: url)
+                }.value
+                let stagingDirectory = staged.directory
+                let stagedURL = staged.file
                 defer { try? FileManager.default.removeItem(at: stagingDirectory) }
-                try FileManager.default.copyItem(at: url, to: stagedURL)
-                try FileManager.default.setAttributes(
-                    [.posixPermissions: 0o600],
-                    ofItemAtPath: stagedURL.path
-                )
 
+                try await self.ensureLease()
                 let response = try await self.supervisor.installBinary(sourcePath: stagedURL.path)
                 guard response[SupervisorResponseKey.ok] as? Bool == true else {
                     throw SupervisorClientError.rejected(response[SupervisorResponseKey.message] as? String ?? L("error.binaryInstall"))
@@ -344,16 +363,14 @@ final class AppModel: ObservableObject {
                 if wasRunning {
                     await self.startAsync()
                 } else {
-                    if self.leaseID != nil { _ = try? await self.supervisor.releaseLease() }
-                    self.leaseID = nil
+                    await self.releaseLeaseIfNeeded()
                 }
             } catch {
                 lastError = error.localizedDescription
                 if wasRunning {
                     await self.startAsync()
                 } else {
-                    if self.leaseID != nil { _ = try? await self.supervisor.releaseLease() }
-                    self.leaseID = nil
+                    await self.releaseLeaseIfNeeded()
                 }
             }
         }
@@ -549,7 +566,7 @@ final class AppModel: ObservableObject {
 
     func shutdownBlocking() {
         monitorTask?.cancel()
-        heartbeatTask?.cancel()
+        stopLeaseHeartbeat()
         supervisor.stopAndReleaseBlocking()
         leaseID = nil
     }
@@ -567,9 +584,7 @@ final class AppModel: ObservableObject {
                 refreshServiceManagementState()
             }
 
-            if leaseID == nil {
-                leaseID = try await supervisor.acquireLease()
-            }
+            try await ensureLease()
             let response = try await supervisor.start(
                 host: supervisorHost,
                 credentials: activeAPICredentials,
@@ -585,7 +600,7 @@ final class AppModel: ObservableObject {
             monitorTask?.cancel()
             heartbeatTask?.cancel()
             monitorTask = nil
-            heartbeatTask = nil
+            stopLeaseHeartbeat()
             let requestTimedOut = (error as? SupervisorClientError)?.isTimeout == true
             if !requestTimedOut {
                 _ = try? await supervisor.stop()
@@ -593,39 +608,105 @@ final class AppModel: ObservableObject {
             state = .failed
             lastError = error.localizedDescription
             if !requestTimedOut, leaseID != nil {
-                _ = try? await supervisor.releaseLease()
+                await releaseLeaseIfNeeded()
+            } else if requestTimedOut {
+                leaseID = nil
             }
-            self.leaseID = nil
         }
     }
 
     private func stopAsync() async {
-        guard state != .stopped && state != .unavailable else { return }
+        guard state != .stopped && state != .unavailable else {
+            monitorTask?.cancel()
+            monitorTask = nil
+            await releaseLeaseIfNeeded()
+            return
+        }
         state = .stopping
         monitorTask?.cancel()
-        heartbeatTask?.cancel()
         monitorTask = nil
-        heartbeatTask = nil
+        stopLeaseHeartbeat()
 
         do {
             let response = try await supervisor.stop()
             updateState(from: response)
-            if leaseID != nil {
-                _ = try? await supervisor.releaseLease()
-            }
         } catch {
             lastError = error.localizedDescription
             state = .failed
         }
-        leaseID = nil
+        await releaseLeaseIfNeeded()
         apiAvailable = false
         uploadRate = 0
         downloadRate = 0
     }
 
+    private func ensureLease() async throws {
+        // Invalidate any previous heartbeat before validating or replacing its
+        // lease. An in-flight old request must not be allowed to report into a
+        // newly acquired lease session.
+        stopLeaseHeartbeat()
+
+        if leaseID != nil {
+            do {
+                try await supervisor.renewLease()
+            } catch {
+                _ = try? await supervisor.releaseLease()
+                leaseID = nil
+            }
+        }
+
+        if leaseID == nil {
+            leaseID = try await supervisor.acquireLease()
+        }
+        startLeaseHeartbeat()
+    }
+
+    private func startLeaseHeartbeat() {
+        heartbeatTask?.cancel()
+        let generation = UUID()
+        leaseHeartbeatGeneration = generation
+        heartbeatTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(nanoseconds: 2_000_000_000)
+                } catch {
+                    return
+                }
+
+                guard !Task.isCancelled,
+                      let self,
+                      self.leaseHeartbeatGeneration == generation,
+                      self.leaseID != nil else { return }
+                do {
+                    try await self.supervisor.renewLease()
+                } catch {
+                    guard !Task.isCancelled,
+                          self.leaseHeartbeatGeneration == generation,
+                          self.leaseID != nil else { return }
+                    self.leaseID = nil
+                    self.lastError = error.localizedDescription
+                    self.state = .failed
+                    return
+                }
+            }
+        }
+    }
+
+    private func stopLeaseHeartbeat() {
+        leaseHeartbeatGeneration = UUID()
+        heartbeatTask?.cancel()
+        heartbeatTask = nil
+    }
+
+    private func releaseLeaseIfNeeded() async {
+        stopLeaseHeartbeat()
+        guard leaseID != nil else { return }
+        _ = try? await supervisor.releaseLease()
+        leaseID = nil
+    }
+
     private func startMonitoring() {
         monitorTask?.cancel()
-        heartbeatTask?.cancel()
 
         monitorTask = Task { [weak self] in
             var previousDownload: UInt64?
@@ -656,20 +737,6 @@ final class AppModel: ObservableObject {
                     self.downloadRate = 0
                 }
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
-            }
-        }
-
-        heartbeatTask = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
-                guard !Task.isCancelled, let self, self.leaseID != nil else { return }
-                do {
-                    try await self.supervisor.renewLease()
-                } catch {
-                    self.lastError = error.localizedDescription
-                    self.state = .failed
-                    return
-                }
             }
         }
     }
