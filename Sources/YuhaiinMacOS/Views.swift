@@ -622,11 +622,11 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
     var symbol: String {
         switch self {
         case .service: return "gearshape.2.fill"
-        case .statusBar: return "menubar.rectangle"
+        case .statusBar: return "gauge.with.dots.needle.67percent"
         case .controlPage: return "globe"
-        case .runtime: return modernSymbol("apple.terminal.fill", fallback: "terminal.fill")
+        case .runtime: return "shippingbox.fill"
         case .authentication: return modernSymbol("key.horizontal.fill", fallback: "key.fill")
-        case .appUpdates: return "arrow.down.app.fill"
+        case .appUpdates: return "arrow.down.to.line"
         case .yuhaiinUpdates: return modernSymbol("arrow.trianglehead.2.clockwise.rotate.90", fallback: "arrow.triangle.2.circlepath")
         case .diagnostics: return "stethoscope"
         }
@@ -653,14 +653,21 @@ private struct SectionIcon: View {
     var size: CGFloat = 22
 
     var body: some View {
-        Image(systemName: symbol)
-            .font(.system(size: size * 0.55, weight: .semibold))
-            .foregroundStyle(.white)
+        // The sidebar applies its own icon sizing, which overrides a font set
+        // on the symbol. Drawing it resizable inside the squircle keeps the
+        // glyph within the frame at any row size.
+        RoundedRectangle(cornerRadius: size * 0.27, style: .continuous)
+            .fill(tint.gradient)
+            .overlay {
+                Image(systemName: symbol)
+                    .resizable()
+                    .symbolRenderingMode(.monochrome)
+                    .fontWeight(.semibold)
+                    .scaledToFit()
+                    .foregroundStyle(.white)
+                    .padding(size * 0.2)
+            }
             .frame(width: size, height: size)
-            .background(
-                RoundedRectangle(cornerRadius: size * 0.27, style: .continuous)
-                    .fill(tint.gradient)
-            )
             .overlay {
                 RoundedRectangle(cornerRadius: size * 0.27, style: .continuous)
                     .strokeBorder(.white.opacity(0.2), lineWidth: 0.5)
