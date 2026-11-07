@@ -5,10 +5,24 @@ ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 BUILD_DIR="$ROOT_DIR/build"
 APP="$BUILD_DIR/Yuhaiin.app"
 
-swift build --configuration release
-ARM_BIN_DIR=$(swift build --configuration release --show-bin-path)
-swift build --configuration release --triple x86_64-apple-macosx13.0
-X86_BIN_DIR=$(swift build --configuration release --triple x86_64-apple-macosx13.0 --show-bin-path)
+# Build each architecture in its own scratch directory. Newer SwiftPM build
+# backends write every triple to the same `.build/out/Products/Release`
+# directory, so a shared scratch path lets the x86_64 build overwrite arm64.
+swift_build_arch() {
+    arch=$1
+    shift
+    swift build --configuration release \
+        --scratch-path "$ROOT_DIR/.build/$arch" \
+        --triple "$arch-apple-macosx13.0" "$@"
+}
+swift_build_arch arm64
+ARM_BIN_DIR=$(swift_build_arch arm64 --show-bin-path)
+swift_build_arch x86_64
+X86_BIN_DIR=$(swift_build_arch x86_64 --show-bin-path)
+if [ "$ARM_BIN_DIR" = "$X86_BIN_DIR" ]; then
+    echo "error: arm64 and x86_64 builds share $ARM_BIN_DIR" >&2
+    exit 1
+fi
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Library/LaunchDaemons" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
