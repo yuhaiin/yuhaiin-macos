@@ -26,6 +26,9 @@ struct YuhaiinMacOSApp: App {
         Window(L("menu.settings"), id: "settings") {
             SettingsView(model: model, updater: updater)
         }
+        // The sidebar runs up behind the traffic lights; the detail header
+        // already shows the section title.
+        .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 900, height: 650)
     }
 }

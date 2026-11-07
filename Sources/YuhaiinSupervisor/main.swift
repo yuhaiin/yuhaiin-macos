@@ -296,9 +296,10 @@ private final class SupervisorCore: @unchecked Sendable {
             let stagingDirectory = self.dataPathURL().appendingPathComponent("updates/.staging", isDirectory: true)
             let stagingURL = stagingDirectory.appendingPathComponent("yuhaiin-\(UUID().uuidString)", isDirectory: false)
 
-            Task { [weak self] in
+            // Capture strongly: the task must always run to completion so
+            // `updateRunning` is reset and `reply` is called.
+            Task { [self] in
                 do {
-                    guard let self else { return }
                     try self.ensurePrivateDirectory(at: stagingDirectory)
                     try await Self.download(url: url, to: stagingURL)
                     self.queue.async {
@@ -325,11 +326,12 @@ private final class SupervisorCore: @unchecked Sendable {
                         }
                     }
                 } catch {
-                    self?.queue.async {
-                        self?.updateRunning = false
-                        self?.state = self?.process?.isRunning == true ? "running" : "failed"
-                        self?.lastError = error.localizedDescription
-                        reply(self?.responseLocked(ok: false, message: error.localizedDescription, errorCode: "update_failed") ?? NSDictionary())
+                    self.queue.async {
+                        try? FileManager.default.removeItem(at: stagingURL)
+                        self.updateRunning = false
+                        self.state = self.process?.isRunning == true ? "running" : "failed"
+                        self.lastError = error.localizedDescription
+                        reply(self.responseLocked(ok: false, message: error.localizedDescription, errorCode: "update_failed"))
                     }
                 }
             }

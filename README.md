@@ -20,7 +20,7 @@ YUHAIIN_AMD64=/path/to/yuhaiin_darwin_amd64 \
 
 If an architecture binary is missing and the adjacent checkout is available, the script attempts a `GOOS=darwin`, `CGO_ENABLED=0` cross-build. It uses the `untested_go_version` build tag by default for compatibility with the current Go dependencies; override it with `YUHAIIN_GO_BUILD_TAGS` when needed.
 
-The app bundle is assembled as a Universal 2 application. `build.sh` embeds the yuhaiin binaries, copies the English, Japanese, and Korean `.lproj` resources, and packages the Yuhaiin Android delivery-truck icon as `AppIcon.icns`.
+The app bundle is assembled as a Universal 2 application. `build.sh` embeds the yuhaiin binaries, copies the English, Japanese, and Korean `.lproj` resources, and packages the yuhaiin "packet rhythm" icon as `AppIcon.icns`. To regenerate it from `Resources/AppIcon.svg`, run `./scripts/render-app-icon.sh` (requires `rsvg-convert`).
 
 For Sparkle app updates, the release pipeline should provide an appcast URL and EdDSA public key:
 
