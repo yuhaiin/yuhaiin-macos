@@ -646,6 +646,19 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
     }
 }
 
+/// The translucent AppKit sidebar material, for a sidebar laid out by hand.
+private struct SidebarMaterial: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = NSVisualEffectView()
+        view.material = .sidebar
+        view.blendingMode = .behindWindow
+        view.state = .followsWindowActiveState
+        return view
+    }
+
+    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {}
+}
+
 /// System Settings–style tinted squircle icon.
 private struct SectionIcon: View {
     let symbol: String
@@ -740,7 +753,10 @@ struct SettingsView: View {
     @State private var showBinaryImporter = false
 
     var body: some View {
-        NavigationSplitView {
+        // A plain HStack instead of NavigationSplitView: the split view's
+        // NSSplitView divider draws a hard black line that SwiftUI cannot
+        // hide. The settings window has no need for a collapsible sidebar.
+        HStack(spacing: 0) {
             List(SettingsSection.allCases, selection: $selection) { section in
                 Label {
                     Text(section.title)
@@ -750,9 +766,17 @@ struct SettingsView: View {
                 .tag(section)
             }
             .listStyle(.sidebar)
-            .navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 260)
-            .navigationTitle("Yuhaiin")
-        } detail: {
+            .scrollContentBackground(.hidden)
+            .safeAreaInset(edge: .top, spacing: 0) {
+                // Clear the traffic-light buttons in the hidden title bar.
+                Color.clear.frame(height: 12)
+            }
+            .frame(width: 230)
+            .background {
+                SidebarMaterial()
+                    .ignoresSafeArea()
+            }
+
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     HStack(alignment: .center, spacing: 12) {
@@ -777,11 +801,11 @@ struct SettingsView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .animation(Motion.spring, value: selection)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background {
                 AmbientBackground(tint: selection.tint)
             }
         }
-        .navigationSplitViewStyle(.balanced)
         .frame(minWidth: 860, minHeight: 620)
         .fileImporter(
             isPresented: $showBinaryImporter,
