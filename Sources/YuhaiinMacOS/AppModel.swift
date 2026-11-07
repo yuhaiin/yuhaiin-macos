@@ -67,13 +67,17 @@ enum YuhaiinServiceState: String {
 
     var symbol: String {
         switch self {
-        case .running: return "checkmark.circle.fill"
-        case .starting, .stopping: return "arrow.triangle.2.circlepath"
+        case .running: return "bolt.horizontal.circle.fill"
+        case .starting, .stopping: return modernSymbol("arrow.trianglehead.2.clockwise", fallback: "arrow.triangle.2.circlepath")
         case .failed: return "exclamationmark.triangle.fill"
-        case .awaitingApproval: return "lock.fill"
-        case .unavailable: return "questionmark.circle"
-        case .stopped: return "power"
+        case .awaitingApproval: return "lock.shield.fill"
+        case .unavailable: return modernSymbol("questionmark.circle.dashed", fallback: "questionmark.circle")
+        case .stopped: return "power.circle"
         }
+    }
+
+    var isTransitioning: Bool {
+        self == .starting || self == .stopping
     }
 }
 
